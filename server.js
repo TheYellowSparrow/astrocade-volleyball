@@ -1,4 +1,4 @@
-// server.js
+// server.js (updated — uses "team" consistently instead of "side")
 const express = require('express');
 const http = require('http');
 const WebSocket = require('ws');
@@ -21,7 +21,7 @@ DEFAULT_LOBBIES.forEach(l => {
   rooms[l.id] = {
     id: l.id,
     max: l.max,
-    players: new Map(), // playerId -> player object
+    players: new Map(), // playerId -> { id, name, team }
     hostId: null,
     phase: 'lobby', // 'lobby' or 'playing'
     scores: { left: 0, right: 0 },
@@ -29,7 +29,7 @@ DEFAULT_LOBBIES.forEach(l => {
   };
 });
 
-// clients map: playerId -> { ws, name, roomId, side, x, y, vx, vy, input }
+// clients map: playerId -> { ws, name, roomId, team, x, y, vx, vy, input, onGround }
 const clients = new Map();
 
 const app = express();
@@ -72,12 +72,12 @@ function broadcastToRoom(roomId, obj) {
   });
 }
 
-// Helper to compute spawn positions based on side and index
-function computeSpawn(side, index) {
+// Helper to compute spawn positions based on team and index
+function computeSpawn(team, index) {
   const leftBaseX = 225 + index * 40;
   const rightBaseX = 900 - index * 40;
   const y = GROUND_Y - 24;
-  return side === 'left' ? { x: leftBaseX, y } : { x: rightBaseX, y };
+  return team === 'left' ? { x: leftBaseX, y } : { x: rightBaseX, y };
 }
 
 // When a player leaves a room, update host and broadcast
@@ -131,7 +131,13 @@ setInterval(() => {
       }
       // clamp to court
       client.x = Math.max(40, Math.min(1160, client.x));
-      playersArray.push({ id: client.id, name: client.name, x: Math.round(client.x), y: Math.round(client.y), side: client.side });
+      playersArray.push({
+        id: client.id,
+        name: client.name,
+        x: Math.round(client.x),
+        y: Math.round(client.y),
+        team: client.team // authoritative team value
+      });
     });
 
     // simple volleyball physics
@@ -175,12 +181,12 @@ function resetRound(room) {
   room.vb.y = 300;
   room.vb.vx = (Math.random() < 0.5 ? -1 : 1) * 6;
   room.vb.vy = -8;
-  // reposition players to their side spawn
+  // reposition players to their team spawn
   let leftIndex = 0, rightIndex = 0;
   room.players.forEach(p => {
     const client = clients.get(p.id);
     if (!client) return;
-    if (client.side === 'left') {
+    if (client.team === 'left') {
       const sp = computeSpawn('left', leftIndex++);
       client.x = sp.x; client.y = sp.y; client.vx = 0; client.vy = 0; client.onGround = true;
     } else {
@@ -199,7 +205,7 @@ wss.on('connection', (ws, req) => {
     ws,
     name: null,
     roomId: null,
-    side: 'left',
+    team: 'left', // default team
     x: 225,
     y: GROUND_Y - 24,
     vx: 0,
@@ -251,13 +257,13 @@ wss.on('connection', (ws, req) => {
         }
         client.name = name;
         client.roomId = roomId;
-        // default side: left (host can change)
-        client.side = client.side || 'left';
-        // compute spawn index
-        const sideCount = Array.from(room.players.values()).filter(p => p.side === client.side).length;
-        const sp = computeSpawn(client.side, sideCount);
+        // default team: left (host can change)
+        client.team = client.team || 'left';
+        // compute spawn index for that team
+        const sideCount = Array.from(room.players.values()).filter(p => p.team === client.team).length;
+        const sp = computeSpawn(client.team, sideCount);
         client.x = sp.x; client.y = sp.y; client.vx = 0; client.vy = 0; client.onGround = true;
-        room.players.set(id, { id, name: client.name, side: client.side });
+        room.players.set(id, { id, name: client.name, team: client.team });
         // assign host if none
         if (!room.hostId) room.hostId = id;
         // notify joining client
@@ -269,7 +275,7 @@ wss.on('connection', (ws, req) => {
           players: Array.from(room.players.values())
         });
         // notify others in room
-        broadcastToRoom(roomId, { type: 'playerJoined', player: { id, name: client.name, side: client.side } });
+        broadcastToRoom(roomId, { type: 'playerJoined', player: { id, name: client.name, team: client.team } });
         // update lobby list globally
         broadcastLobbyList();
         break;
@@ -289,16 +295,17 @@ wss.on('connection', (ws, req) => {
         const team = msg.team === 'right' ? 'right' : 'left';
         const targetClient = clients.get(targetId);
         if (!targetClient || targetClient.roomId !== roomId) break;
-        targetClient.side = team;
+        // update authoritative client record
+        targetClient.team = team;
         // update room players map
         const p = room.players.get(targetId);
-        if (p) { p.side = team; room.players.set(targetId, p); }
-        // reposition target to their side spawn
-        const sideIndex = Array.from(room.players.values()).filter(x => x.side === team).findIndex(x => x.id === targetId);
+        if (p) { p.team = team; room.players.set(targetId, p); }
+        // compute new index among players on that team (after update)
+        const sideIndex = Array.from(room.players.values()).filter(x => x.team === team).findIndex(x => x.id === targetId);
         const sp = computeSpawn(team, Math.max(0, sideIndex));
         targetClient.x = sp.x; targetClient.y = sp.y; targetClient.vx = 0; targetClient.vy = 0; targetClient.onGround = true;
-        // broadcast update
-        broadcastToRoom(roomId, { type: 'playerUpdated', player: { id: targetId, name: targetClient.name, side: team } });
+        // broadcast update to room (use "team" property)
+        broadcastToRoom(roomId, { type: 'playerUpdated', player: { id: targetId, name: targetClient.name, team } });
         break;
       }
 
@@ -339,12 +346,12 @@ wss.on('connection', (ws, req) => {
         room.phase = 'playing';
         room.scores = { left: 0, right: 0 };
         room.vb = { x: 600, y: 300, vx: (Math.random() < 0.5 ? -1 : 1) * 6, vy: -8 };
-        // initialize player physics state
+        // initialize player physics state and ensure team values are authoritative
         let leftIndex = 0, rightIndex = 0;
         room.players.forEach(p => {
           const c = clients.get(p.id);
           if (!c) return;
-          if (c.side === 'left') {
+          if (c.team === 'left') {
             const sp = computeSpawn('left', leftIndex++);
             c.x = sp.x; c.y = sp.y; c.vx = 0; c.vy = 0; c.onGround = true;
           } else {
@@ -352,7 +359,11 @@ wss.on('connection', (ws, req) => {
             c.x = sp.x; c.y = sp.y; c.vx = 0; c.vy = 0; c.onGround = true;
           }
         });
-        broadcastToRoom(roomId, { type: 'gameStarted' });
+        // broadcast gameStarted and include players with team property
+        broadcastToRoom(roomId, {
+          type: 'gameStarted',
+          players: Array.from(room.players.values()).map(p => ({ id: p.id, name: p.name, team: p.team }))
+        });
         break;
       }
 
