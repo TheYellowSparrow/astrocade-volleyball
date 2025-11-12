@@ -11,6 +11,8 @@
   "license": "ISC",
   "type": "commonjs",
   "dependencies": {
+    "express": "^5.1.0",
+    "uuid": "^13.0.0",
     "ws": "^8.18.3"
   }
 }
